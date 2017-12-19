@@ -1,0 +1,365 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <string.h>
+
+#include "bmp.h"
+#include "randpix.h"
+
+// Strip of Pixels
+struct STRIP
+{
+	RGBTRIPLE* pixels; 									// Array of pixels
+	int cn; 										// Chunk number
+};
+
+void writeToMemory(BYTE* dest, BYTE* src, int size, int start)
+{
+
+	for ( int i = 0, j = start; i < size; i++, j++ )
+	{
+
+		dest[j] = src[i];		
+
+	}
+
+}
+
+int main(int argc, char* argv[])
+{ 
+
+	// Check command-line arguments
+	if ( argc != 3 )
+	{
+
+		printf( "Usage: %s [filename] [chunksize]\n", argv[0] );
+		return 1;
+
+	}
+
+	// Chunk size
+	int cs = atoi(argv[2]);
+
+	// Check atoi's results
+	if ( cs == 0 && strcmp(argv[2], "0") != 0 )
+	{
+
+		printf("Usage: %s [filename] [chunksize]\n", argv[0]);
+		return 1;
+
+	}
+
+	// File descriptors
+	int fd, fd2;
+
+	// Attempt to open the input file
+	if ((fd = open(argv[1], O_RDONLY)) == -1)
+	{
+
+		fprintf( stderr, "Error opening file %s for reading\n", argv[1] );
+		return 2;
+
+	}
+
+	char* outfile = "./randomized.bmp";
+
+	// Attempt to open the output file
+	if ((fd2 = open(outfile, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0600)) == -1)
+	{
+
+		close(fd);
+		fprintf( stderr, "Error opening file %s for writing\n", outfile);
+		return 2;
+
+	}
+	
+	// Get the size of the file
+	struct stat sb;
+	fstat(fd, &sb);
+	off_t size = sb.st_size;
+
+	BYTE* map = (BYTE*)mmap( 0, size, PROT_READ, MAP_SHARED, fd, 0 );
+
+	if ( map == MAP_FAILED )
+	{
+
+		close(fd);
+		close(fd2);
+		fprintf( stderr, "Error mapping the input file\n" );
+		return 3;
+
+	}
+
+	/*
+	for ( off_t i = 0; i < size; i++ )
+	{
+		printf("%d\n", map[(int)i]);
+	}*/
+
+	BYTE* map2 = (BYTE*)mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0);
+
+	if ( map2 == MAP_FAILED )
+	{
+
+		munmap( map, size );
+		close(fd);
+		close(fd2);
+		fprintf( stderr, "Error mapping the output file\n" );
+		return 3;
+
+	}
+
+	if ( lseek(fd2, size - 1, SEEK_SET) == -1 )
+	{
+
+		munmap( map,  size );
+		munmap( map2, size );
+		close(fd);
+		close(fd2);
+		fprintf( stderr, "Error calling lseek() to stretch the file\n" );
+		return 4;
+
+	}
+	
+	if ( write(fd2, "", 1) == -1 )
+	{
+
+		close(fd);
+		close(fd2);
+		fprintf( stderr, "Error writing the last byte of the file\n" );
+		return 5;
+
+	}
+
+	// File index
+	int fi = 0;
+
+	// Read file header
+	BITMAPFILEHEADER* bf = (BITMAPFILEHEADER*) map;
+	writeToMemory(map2, (BYTE*) bf, sizeof(BITMAPFILEHEADER), fi);
+
+	fi = sizeof(BITMAPFILEHEADER);
+
+	// Read info header
+	BITMAPINFOHEADER* bi = (BITMAPINFOHEADER*) (map + fi);
+	writeToMemory(map2, (BYTE*) bi, sizeof(BITMAPINFOHEADER), fi);
+	fi += sizeof(BITMAPINFOHEADER);
+
+	// Check bitmap format
+	if ( bf->bfType != 0x4d42 || bf->bfOffBits != 54 || bi->biSize != 40 || 
+	     bi->biBitCount != 24 || bi->biCompression != 0 			)
+	{
+		munmap( map,  size );
+		munmap( map2, size );
+	        close( fd  );
+		close( fd2 );
+	        fprintf( stderr, "Unsupported file format\n" );
+		return 4;
+	}
+
+	int imgWidth = bi->biWidth;
+	int imgHeight = abs(bi->biHeight);
+
+	cs = getProperChunkSize(cs, imgWidth, imgHeight);
+
+	int chunkN = (imgWidth / cs) * (imgHeight / cs);
+
+	int* arr = getNumList(chunkN);
+
+	// TODO REMOVE THIS
+	//shuffle(arr, chunkN);
+
+	int stripN = (imgWidth / cs) * imgHeight;
+
+	int padding = (4 - (imgWidth * sizeof(RGBTRIPLE)) % 4) % 4;
+
+	STRIP* strips = (STRIP*) malloc(stripN * sizeof(STRIP));
+
+	for ( int i = 0; i < stripN; i++, fi += cs * sizeof(RGBTRIPLE) )
+	{
+
+		strips[i].pixels = (RGBTRIPLE*) (map + fi);
+		if ( (i+1) % ( imgWidth / cs ) == 0 )
+			fi += padding;
+		
+	}
+
+	/*
+	for ( int i = 0; i < imgHeight / cs; i++ )
+	{
+
+		for ( int j = 0; j < imgWidth / cs; j++ )
+		{
+			printf("%d,%d\n", i, j);
+			(strips + (i * (imgWidth / cs)) + j)->pixels = (RGBTRIPLE*) ( map + fi + cs * j );
+
+		}
+
+		fi += imgWidth + padding;
+
+	}
+	*/
+
+	//printf("%lu\n",sizeof(strips));
+	//printf("%lu\n", sizeof(STRIP));
+	int blue, green, red;
+	RGBTRIPLE pixel;
+	for (int i = 0; i < stripN; i++)
+	{
+
+		for ( int j = 0; j < cs; j++ )
+		{
+			pixel = strips[i].pixels[j];
+			blue = pixel.rgbtBlue;
+			green = pixel.rgbtGreen;
+			red = pixel.rgbtRed;
+			//printf("r = %i, g = %i, b = %i\n", red, green, blue);
+		}
+//		printf("%d\n", i);
+
+	}
+
+	printf("i\tcn\tcx\tcy\tcxn\tx\ty\tpi\n_____________________________________________________________\n");
+	int cxn = imgWidth / cs;
+	int cyn = imgHeight / cs;
+	int pi, cn, cx, cy, x, y, p;
+	int fo = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+	for ( int i = 0; i < chunkN; i++ )
+	{
+
+		cn = arr[i];
+		cx = cn % cxn;
+		cy = cn / cyn;
+		x = cx * cs;
+		y = cy * cs;
+		pi = y * imgHeight + x;
+		printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", i, cn, cx, cy, cxn, x, y, pi);
+		for (int j = 0; j < cs; j++)
+		{
+
+			pi += j * imgWidth + padding;
+
+			p = pi * sizeof(RGBTRIPLE);
+
+			writeToMemory(map2, (BYTE*) strips[i + j * cx].pixels, cs * sizeof(RGBTRIPLE), p + fo);
+
+			//(map2 + p + fo) = (BYTE*) strips[i + j * cx].pixels;
+
+		}
+	}
+
+	if ( padding != 0 )
+	{
+		for ( int i = 0; i < imgHeight; i++ )
+		{
+			writeToMemory(map2, (BYTE*)map, cs * sizeof(RGBTRIPLE), fo + i * sizeof(RGBTRIPLE) + padding);
+			//(map2 + (fo + i * (imgWidth * sizeof(RGBTRIPLE) + padding))) = (BYTE*)(map + (fo + i * (imgWidth * sizeof(RGBTRIPLE) + padding)));
+		}
+	}	
+	free(strips);
+	free(arr);
+
+	// Time for cleanup
+	if ( munmap(map, size) == -1 )
+	{
+
+		fprintf(stderr, "Error unmapping the input file\n");	
+
+	}
+
+	if ( munmap(map2, size) == -1 )
+	{
+
+		fprintf( stderr, "Error unmapping output memory\n" );
+
+	}
+
+	close(fd);
+	close(fd2);
+
+	// All done :)
+	return 0;
+
+}
+
+void shuffle(int *array, size_t n)
+{
+	if (n > 1) 
+	{
+		size_t i;
+		for (i = 0; i < n - 1; i++) 
+		{
+			size_t j = i + rand() / (RAND_MAX / (n - i) + 1);
+			int t = array[j];
+			array[j] = array[i];
+			array[i] = t;
+
+		}
+
+	}
+
+}
+ 
+int getProperChunkSize(int cs, int w, int h)
+{
+
+	if ( cs == 0 )
+		return 1;
+
+	if ( w % cs == 0 && h % cs == 0 )
+		return cs;
+
+	int tcs = cs;
+
+	for ( ; cs <= w / 2 && cs <= h / 2; cs++ )
+	{
+		if ( w % cs == 0 && h % cs == 0 )
+		{
+			return cs;
+		}
+	}
+
+	cs = tcs;
+
+	for ( ; cs > 2; cs-- )
+	{
+		if ( w % cs == 0 && h % cs == 0 )
+		{
+			return cs;
+		}
+	}
+
+	return 2;
+
+}
+
+int* getNumList(int size)
+{
+
+	int* arr = (int*) malloc(size * sizeof(int));
+
+	for ( int i = 0; i < size; i++ )
+	{
+		arr[i] = i;
+	}
+
+	return arr;
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
